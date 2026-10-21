@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Unstable Unicorns</title>
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Unstable Unicorns</h1>
+      <div class="topbar-actions">
+        <label class="speed">Vitesse de l'ordinateur
+          <select id="speed">
+            <option value="1400">Lente</option>
+            <option value="700" selected>Normale</option>
+            <option value="250">Rapide</option>
+          </select>
+        </label>
+        <button id="btn-rules" type="button">Règles</button>
+        <button id="btn-new" type="button">Nouvelle partie</button>
+      </div>
+    </header>
+
+    <main id="setup" class="setup">
+      <form id="setup-form" class="setup-card">
+        <h2>Nouvelle partie</h2>
+        <label>Votre nom <input id="setup-name" type="text" value="Joueur" maxlength="16" /></label>
+        <label>Nombre d'adversaires
+          <select id="setup-opponents">
+            <option value="1" selected>1 (règles à 2 joueurs)</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7">7</option>
+          </select>
+        </label>
+        <label>Premier joueur
+          <select id="setup-first">
+            <option value="random" selected>Au hasard</option>
+            <option value="me">Moi</option>
+          </select>
+        </label>
+        <label class="check"><input id="setup-reshuffle" type="checkbox" /> Variante : mélanger la défausse dans le paquet quand il est épuisé</label>
+        <p class="hint">Les cibles sont choisies après les réponses Huuue (option de ciblage 2 du livret).</p>
+        <button type="submit" class="primary">Commencer</button>
+      </form>
+    </main>
+
+    <main id="game" class="game" hidden>
+      <section id="opponents" class="opponents"></section>
+      <section class="center">
+        <div id="piles" class="piles"></div>
+        <div id="status" class="status"></div>
+        <div id="prompt" class="prompt"></div>
+      </section>
+      <section id="me" class="me"></section>
+      <aside class="log-panel">
+        <h2>Journal</h2>
+        <ol id="log" class="log"></ol>
+      </aside>
+    </main>
+
+    <div id="modal" class="modal" hidden>
+      <div class="modal-box">
+        <button type="button" class="modal-close" aria-label="Fermer">×</button>
+        <div id="modal-content"></div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <script src="js/cards.js"></script>
+    <script src="js/engine.js"></script>
+    <script src="js/ai.js"></script>
+    <script src="js/rules.js"></script>
+    <script src="js/ui.js"></script>
+  </body>
+</html>
