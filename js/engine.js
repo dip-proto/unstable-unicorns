@@ -74,8 +74,9 @@
       for (const listener of this.listeners) listener(event || { type: 'update' });
     }
 
-    log(text, kind) {
-      const entry = { text, kind: kind || 'info' };
+    // `data` names the players and cards of the entry, so the page can show them.
+    log(text, kind, data) {
+      const entry = Object.assign({ text, kind: kind || 'info' }, data);
       this.entries.push(entry);
       this.emit({ type: 'log', entry });
     }
@@ -114,16 +115,17 @@
 
     // The only place that moves a card between zones.
     move(card, zone, player) {
+      const from = { zone: card.zone, owner: card.owner };
       if (card.zone) {
-        const from = this.zoneArray(card.zone, card.owner);
-        const i = from.indexOf(card);
+        const cards = this.zoneArray(card.zone, card.owner);
+        const i = cards.indexOf(card);
         if (i < 0) throw new Error('Card ' + card.def.key + ' is not in its zone');
-        from.splice(i, 1);
+        cards.splice(i, 1);
       }
       card.zone = zone;
       card.owner = player === undefined || player === null ? null : player.index;
       this.zoneArray(zone, card.owner).push(card);
-      this.emit();
+      this.emit({ type: 'move', card, from });
     }
 
     ownerOf(card) {
@@ -285,7 +287,7 @@
         this.move(this.deck[this.deck.length - 1], 'hand', player);
         drawn++;
       }
-      if (drawn > 0) this.log(`${player.name} pioche ${UU.plural(drawn, 'carte')}.`);
+      if (drawn > 0) this.log(`${player.name} pioche ${UU.plural(drawn, 'carte')}.`, 'info', { player, drew: drawn });
       return drawn;
     }
 
@@ -585,7 +587,7 @@
         }
         if (!neigh) return false;
         this.move(neigh, 'limbo', who);
-        this.log(`${who.name} joue ${neigh.def.name} contre ${this.describe(card)} de ${by.name} !`, 'neigh');
+        this.log(`${who.name} joue ${neigh.def.name} contre ${this.describe(card)} de ${by.name} !`, 'neigh', { player: who, card: neigh, target: card });
         const stopped = neigh.def.key === 'super_neigh' ? false : await this.neighWindow(neigh, who, card);
         this.move(neigh, 'discard');
         if (!stopped) return true;
@@ -594,10 +596,10 @@
 
     async playCard(player, card) {
       this.move(card, 'limbo', player);
-      this.log(`${player.name} joue ${this.describe(card)}.`, 'play');
+      this.log(`${player.name} joue ${this.describe(card)}.`, 'play', { player, card });
       if (await this.neighWindow(card, player)) {
         this.move(card, 'discard');
-        this.log(`${this.describe(card)} est contrée et part à la défausse.`, 'neigh');
+        this.log(`${this.describe(card)} est contrée et part à la défausse.`, 'neigh', { card, countered: true });
         return;
       }
       await this.simultaneously(() => this.resolvePlayed(player, card));
@@ -692,7 +694,7 @@
     async playTurn(player) {
       this.turnNumber++;
       this.turn = { player, phase: null, maxPlays: 1, endNow: false };
-      this.log(`Tour ${this.turnNumber} : ${player.name}.`, 'turn');
+      this.log(`Tour ${this.turnNumber} : ${player.name}.`, 'turn', { player });
 
       this.setPhase('debut');
       await this.beginningOfTurn(player);

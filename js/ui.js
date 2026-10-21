@@ -20,6 +20,23 @@
     instant: '<path d="M10 2 H14 L13.2 15 H10.8 Z M10 18 H14 V22 H10 Z" />',
   };
 
+  const PHASE_STEPS = [
+    ['debut', 'Début'],
+    ['pioche', 'Pioche'],
+    ['action', 'Action'],
+    ['fin', 'Fin'],
+  ];
+
+  const PLAYER_COLORS = ['#7b3fe4', '#e0592a', '#2f8fd0', '#3a9a52', '#d43f8d', '#b98b00', '#0f9a9a', '#8a5a2b'];
+
+  // Hands are hidden, but a card that goes to one of these zones is shown to everyone.
+  const PUBLIC_ZONES = ['discard', 'nursery', 'limbo', 'stable'];
+
+  const FEED_SIZE = 10;
+  const MAX_FLIGHTS = 30;
+
+  const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
+
   function iconFor(type) {
     const key = type === 'baby' || type === 'basic' || type === 'magical' ? 'unicorn' : type;
     return `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[key]}</svg>`;
@@ -34,6 +51,26 @@
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  }
+
+  function colorOf(p) {
+    return PLAYER_COLORS[p.index % PLAYER_COLORS.length];
+  }
+
+  function nameTag(p) {
+    return `<span class="who" style="--pc: ${colorOf(p)}">${escapeHtml(p.name)}</span>`;
+  }
+
+  function anchorKey(zone, owner) {
+    if (zone === 'hand' || zone === 'stable') return `${zone}-${owner}`;
+    return zone;
+  }
+
+  // Restarts a CSS animation on an element that stays in the page.
+  function replay(node, cls) {
+    node.classList.remove(cls);
+    void node.offsetWidth;
+    node.classList.add(cls);
   }
 
   // Keywords in capitals are shown in bold, as on the printed cards.
@@ -61,7 +98,27 @@
       this.selection = [];
       this.renderQueued = false;
       this.logGrew = false;
+      this.resetHistory();
       this.bind();
+    }
+
+    resetHistory() {
+      this.moves = [];
+      this.feed = [];
+      this.lastPlay = new Map();
+      this.enteredOn = new Map();
+      this.counts = new Map();
+      this.acting = null;
+      this.spot = null;
+      this.turnShown = null;
+      this.shownRequest = null;
+      this.shownPhase = null;
+      this.logGroup = null;
+    }
+
+    // Animations follow the computer speed, so a fast game stays fast.
+    duration() {
+      return Math.min(600, Math.max(260, Number($('speed').value) * 0.6));
     }
 
     bind() {
@@ -94,6 +151,10 @@
       this.game = null;
       this.request = null;
       this.resolve = null;
+      for (const id of ['fx', 'banner', 'spotlight']) {
+        $(id).innerHTML = '';
+        $(id).classList.remove('show');
+      }
     }
 
     start() {
@@ -115,7 +176,8 @@
       });
       this.game = game;
       this.human = game.players[0];
-      $('log').innerHTML = '';
+      this.resetHistory();
+      for (const id of ['log', 'opponents', 'piles', 'me', 'feed']) $(id).innerHTML = '';
       $('setup').hidden = true;
       $('game').hidden = false;
       game.on((e) => this.onEvent(game, e));
@@ -131,8 +193,50 @@
       if (e.type === 'private' && e.to === this.human) this.toast(e.text);
       if (e.type === 'private' && e.victim === this.human) this.toast(e.victimText);
       if (e.type === 'over') this.showResult(e.result);
-      if (e.type === 'log') this.appendLog(e.entry);
+      if (e.type === 'ask') this.acting = e.request.type === 'action' ? e.request.player : null;
+      if (e.type === 'move') {
+        this.moves.push(e);
+        if (e.card.zone === 'stable') this.enteredOn.set(e.card.uid, game.turnNumber);
+        // The Neighs are over once the played card leaves the "in play" zone.
+        const last = this.feed[this.feed.length - 1];
+        if (last && last.card === e.card && e.from.zone === 'limbo') last.settled = true;
+      }
+      if (e.type === 'log') {
+        this.appendLog(e.entry);
+        this.track(game, e.entry);
+      }
       this.queueRender();
+    }
+
+    // Keeps the recent plays for the feed, the spotlight and the "last play" of each player.
+    track(g, entry) {
+      const last = this.feed[this.feed.length - 1];
+      let item = null;
+      if (entry.kind === 'play') {
+        item = { player: entry.player, card: entry.card, turn: g.turnNumber, neighs: [], countered: false };
+      } else if (entry.kind === 'neigh' && last && last.card) {
+        if (entry.countered) last.countered = true;
+        else last.neighs.push({ player: entry.player, card: entry.card });
+        last.fresh = true;
+        if (entry.player !== this.human) this.spot = last;
+      } else if (entry.drew && entry.player === this.acting) {
+        // The player drew a card instead of playing one.
+        item = { player: entry.player, card: null, turn: g.turnNumber, neighs: [] };
+      }
+      if (item || entry.kind === 'turn') this.acting = null;
+      if (!item) return;
+      item.fresh = true;
+      this.feed.push(item);
+      if (this.feed.length > FEED_SIZE) this.feed.shift();
+      this.lastPlay.set(item.player.index, item);
+      if (item.card && item.player !== this.human) this.spot = item;
+    }
+
+    // A card counts as new until everyone has had a turn since it arrived.
+    isFresh(card) {
+      const g = this.game;
+      const on = this.enteredOn.get(card.uid);
+      return on > 0 && g.turnNumber - on < g.players.length;
     }
 
     queueRender() {
@@ -150,8 +254,22 @@
       });
     }
 
+    // Each turn gets its own group in the log, so it is easy to see what happened in it.
     appendLog(entry) {
-      $('log').appendChild(el('li', 'log-' + entry.kind, escapeHtml(entry.text)));
+      if (entry.kind === 'turn' || !this.logGroup) {
+        if (this.logGroup) this.logGroup.parentNode.classList.add('past');
+        const group = el('li', 'log-group');
+        if (entry.player) group.style.setProperty('--pc', colorOf(entry.player));
+        group.appendChild(el('div', 'log-head', escapeHtml(entry.kind === 'turn' ? entry.text : 'Mise en place')));
+        this.logGroup = el('ol');
+        group.appendChild(this.logGroup);
+        $('log').appendChild(group);
+        if (entry.kind === 'turn') {
+          this.logGrew = true;
+          return;
+        }
+      }
+      this.logGroup.appendChild(el('li', 'log-' + entry.kind, escapeHtml(entry.text)));
       this.logGrew = true;
     }
 
@@ -221,7 +339,7 @@
       const name = escapeHtml(g.describe(card));
       const text = size === 'small' ? '' : `<div class="card-text">${cardText(d.text)}</div>`;
       const badge = panda ? '<span class="badge">Panda</span>' : '';
-      return `<div class="${classes.join(' ')}"><div class="card-head"><span class="card-icon">${iconFor(d.type)}</span><span class="card-type">${UU.TYPE_NAMES[d.type]}</span>${badge}</div><div class="card-name">${name}</div>${text}</div>`;
+      return `<div class="${classes.join(' ')}" data-uid="${card.uid}"><div class="card-head"><span class="card-icon">${iconFor(d.type)}</span><span class="card-type">${UU.TYPE_NAMES[d.type]}</span>${badge}</div><div class="card-name">${name}</div>${text}</div>`;
     }
 
     cardEl(card, size) {
@@ -263,26 +381,156 @@
     render() {
       const g = this.game;
       if (!g) return;
+      const before = this.measure();
       this.renderOpponents(g);
       this.renderPiles(g);
       this.renderStatus(g);
+      this.renderFeed(g);
       this.renderPrompt(g);
       this.renderMe(g);
+      this.renderBanner(g);
+      this.renderSpotlight(g);
+      this.fly(before);
+    }
+
+    // Where each card and each zone is on the screen, to animate the cards that moved.
+    measure() {
+      const cards = new Map();
+      const anchors = new Map();
+      for (const node of document.querySelectorAll('#game [data-zone] .card[data-uid]')) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width) cards.set(node.dataset.uid, { node, rect, flying: node.getAnimations().some((a) => a.id === 'flight') });
+      }
+      for (const node of document.querySelectorAll('#game [data-anchor]')) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width) anchors.set(node.dataset.anchor, { rect, card: node.classList.contains('card') });
+      }
+      return { cards, anchors };
+    }
+
+    // A zone that shows no card for this move, such as a hidden hand, still has a place on the screen.
+    anchorBox(place, size, first, second) {
+      const key = anchorKey(place.zone, place.owner);
+      const a = first.anchors.get(key) || second.anchors.get(key);
+      if (!a) return null;
+      if (a.card) return a.rect;
+      const w = size.width * 0.4;
+      const h = size.height * 0.4;
+      return { left: a.rect.left + a.rect.width / 2 - w / 2, top: a.rect.top + a.rect.height / 2 - h / 2, width: w, height: h };
+    }
+
+    // Each card that changed zone flies from its old place to its new one, one after the other.
+    fly(before) {
+      const moves = this.moves;
+      this.moves = [];
+      if (calm.matches) return;
+      const after = this.measure();
+      const flights = new Map();
+      for (const m of moves) {
+        // Cards created at the start of the game have no place to come from.
+        if (!m.from.zone) continue;
+        const uid = String(m.card.uid);
+        // A card that went through the deck was shuffled, so it must not show where it came from.
+        if (!flights.has(uid) || m.from.zone === 'deck') flights.set(uid, { card: m.card, from: m.from, shuffled: m.from.zone === 'deck' });
+      }
+      // A card still flying when the board changes again goes on from where it is.
+      for (const [uid, b] of before.cards) {
+        if (b.flying && !flights.has(uid) && after.cards.has(uid)) flights.set(uid, { resume: true });
+      }
+      const step = Math.min(110, 900 / Math.max(1, flights.size));
+      const small = { width: 78, height: 104 };
+      let i = 0;
+      for (const [uid, f] of flights) {
+        if (i >= MAX_FLIGHTS) break;
+        const old = f.shuffled ? null : before.cards.get(uid);
+        const now = after.cards.get(uid);
+        const size = now ? now.rect : old ? old.rect : small;
+        const from = old ? old.rect : this.anchorBox(f.from, size, before, after);
+        const to = now ? now.rect : this.anchorBox({ zone: f.card.zone, owner: f.card.owner }, small, after, before);
+        if (!from || !to || (Math.abs(from.left - to.left) < 2 && Math.abs(from.top - to.top) < 2)) continue;
+        const delay = f.resume ? 0 : i * step;
+        i++;
+        if (now) this.flip(now.node, from, to, delay, !f.resume);
+        else this.ghost(old ? old.node : null, f.card, from, to, delay);
+      }
+    }
+
+    flip(node, from, to, delay, glow) {
+      const dx = from.left - to.left;
+      const dy = from.top - to.top;
+      const start = `translate(${dx}px, ${dy}px) scale(${from.width / to.width}, ${from.height / to.height})`;
+      const duration = this.duration();
+      node.animate(
+        [
+          { transformOrigin: '0 0', transform: start, zIndex: 5 },
+          { transformOrigin: '0 0', transform: 'none', zIndex: 5 },
+        ],
+        { id: 'flight', duration, delay, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)', fill: 'backwards' },
+      );
+      if (glow) node.animate([{ boxShadow: '0 0 0 4px #ffd34d, 0 0 18px 6px #ffd34d' }, { boxShadow: '0 0 0 0 transparent' }], { duration: 900, delay: delay + duration, easing: 'ease-out' });
+    }
+
+    // A card that is not shown where it goes, such as a card drawn by an opponent, flies as a copy and fades out.
+    ghost(node, card, from, to, delay) {
+      const shown = node || PUBLIC_ZONES.includes(card.zone) || (card.zone === 'hand' && card.owner === this.human.index);
+      const copy = node ? node.cloneNode(true) : shown ? el('div', '', this.cardHtml(card, 'small')).firstChild : this.backEl('small');
+      copy.classList.remove('selectable', 'selected', 'fresh');
+      copy.classList.add('ghost');
+      Object.assign(copy.style, { left: `${from.left}px`, top: `${from.top}px`, width: `${from.width}px`, height: `${from.height}px` });
+      $('fx').appendChild(copy);
+      const end = `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height})`;
+      const flight = copy.animate(
+        [
+          { transform: 'none', opacity: 1 },
+          { transform: end, opacity: 0.9, offset: 0.85 },
+          { transform: end, opacity: 0 },
+        ],
+        { duration: this.duration() * 1.2, delay, easing: 'cubic-bezier(0.3, 0.6, 0.2, 1)', fill: 'both' },
+      );
+      flight.onfinish = () => copy.remove();
     }
 
     countLine(g, p) {
       const n = g.unicornCount(p);
-      return `<span class="count${n >= g.winTarget - 1 ? ' danger' : ''}">${n} / ${g.winTarget} Licornes</span>`;
+      const old = this.counts.get(p.index);
+      this.counts.set(p.index, n);
+      const bump = old === undefined || old === n ? '' : n > old ? ' bump-up' : ' bump-down';
+      return `<span class="count${n >= g.winTarget - 1 ? ' danger' : ''}${bump}">${n} / ${g.winTarget} Licornes</span>`;
     }
 
     renderStable(container, p, size) {
       const g = this.game;
       const row = el('div', 'stable');
+      row.dataset.zone = 'stable';
+      row.dataset.anchor = anchorKey('stable', p.index);
       if (p.stable.length === 0) row.appendChild(el('div', 'empty', 'Écurie vide'));
       const unicorns = p.stable.filter((c) => g.isUnicornType(c));
       const others = p.stable.filter((c) => !g.isUnicornType(c));
-      for (const c of unicorns.concat(others)) row.appendChild(this.cardEl(c, size));
+      for (const c of unicorns.concat(others)) {
+        const node = this.cardEl(c, size);
+        if (this.isFresh(c)) node.classList.add('fresh');
+        row.appendChild(node);
+      }
       container.appendChild(row);
+    }
+
+    // What the player did in their last action phase, as a reminder next to their Stable.
+    lastPlayLine(p) {
+      const item = this.lastPlay.get(p.index);
+      if (!item) return null;
+      const line = el('div', 'last-play', `Tour ${item.turn} : `);
+      if (!item.card) {
+        line.appendChild(document.createTextNode('a pioché au lieu de jouer'));
+        return line;
+      }
+      line.appendChild(document.createTextNode('a joué '));
+      const chip = el('button', `chip type-${item.card.def.type}`, escapeHtml(this.game.describe(item.card)));
+      chip.type = 'button';
+      chip.addEventListener('click', () => this.showCard(item.card));
+      line.appendChild(chip);
+      if (item.countered) line.appendChild(el('span', 'outcome bad', 'contrée'));
+      else if (item.neighs.length && item.settled) line.appendChild(el('span', 'outcome', 'Huuue contré'));
+      return line;
     }
 
     renderOpponents(g) {
@@ -290,18 +538,22 @@
       box.innerHTML = '';
       for (const p of g.othersOf(this.human)) {
         const panel = el('div', 'player');
+        panel.style.setProperty('--pc', colorOf(p));
         if (g.turn && g.turn.player === p) panel.classList.add('active');
         if (this.request && this.request.type === 'player' && this.request.options.includes(p)) panel.classList.add('selectable');
         const visible = g.hasInStable(p, 'nanny_cam');
-        const head = el('div', 'player-head', `<strong>${escapeHtml(p.name)}</strong>${this.countLine(g, p)}<span class="hand-count">${plural(p.hand.length, 'carte')} en main${visible ? ' (visible)' : ''}</span>`);
+        const head = el('div', 'player-head', `${nameTag(p)}${this.countLine(g, p)}<span class="hand-count" data-anchor="${anchorKey('hand', p.index)}">${plural(p.hand.length, 'carte')} en main${visible ? ' (visible)' : ''}</span>`);
         panel.appendChild(head);
+        const lastPlay = this.lastPlayLine(p);
+        if (lastPlay) panel.appendChild(lastPlay);
         if (visible && p.hand.length) {
           const hand = el('div', 'stable hand-visible');
+          hand.dataset.zone = 'hand';
           for (const c of p.hand) hand.appendChild(this.cardEl(c, 'small'));
           panel.appendChild(hand);
         }
         this.renderStable(panel, p, 'small');
-        if (g.pending && g.pending.player === p) panel.appendChild(el('div', 'thinking', 'réfléchit…'));
+        if (g.pending && g.pending.player === p) panel.appendChild(el('div', 'thinking', 'réfléchit<span class="dots"><i></i><i></i><i></i></span>'));
         box.appendChild(panel);
       }
     }
@@ -309,26 +561,32 @@
     renderPiles(g) {
       const box = $('piles');
       box.innerHTML = '';
+      box.dataset.zone = 'piles';
       const deck = el('div', 'pile');
-      deck.appendChild(this.backEl('small'));
+      const back = this.backEl('small');
+      back.dataset.anchor = 'deck';
+      deck.appendChild(back);
       deck.appendChild(el('div', 'pile-label', `Paquet<br>${plural(g.deck.length, 'carte')}`));
       box.appendChild(deck);
 
-      box.appendChild(this.pileEl('Défausse', g.discardPile, 'carte'));
-      box.appendChild(this.pileEl('Nurserie', g.nursery, 'bébé'));
+      box.appendChild(this.pileEl('Défausse', 'discard', g.discardPile, 'carte'));
+      box.appendChild(this.pileEl('Nurserie', 'nursery', g.nursery, 'bébé'));
 
       if (g.limbo.length) {
         const play = el('div', 'pile in-play');
+        play.dataset.anchor = 'limbo';
         for (const c of g.limbo) play.appendChild(this.cardEl(c, 'small'));
-        play.appendChild(el('div', 'pile-label', 'En cours'));
+        play.appendChild(el('div', 'pile-label', 'En cours de résolution'));
         box.appendChild(play);
       }
     }
 
-    pileEl(title, cards, word) {
+    pileEl(title, zone, cards, word) {
       const pile = el('div', 'pile clickable');
       const top = cards[cards.length - 1];
-      pile.appendChild(top ? el('div', '', this.cardHtml(top, 'small')).firstChild : el('div', 'card small empty-pile', ''));
+      const card = top ? el('div', '', this.cardHtml(top, 'small')).firstChild : el('div', 'card small empty-pile', '');
+      card.dataset.anchor = zone;
+      pile.appendChild(card);
       pile.appendChild(el('div', 'pile-label', `${title}<br>${plural(cards.length, word)}`));
       pile.addEventListener('click', () => this.showZone(title, cards));
       return pile;
@@ -353,21 +611,95 @@
         box.textContent = 'Mise en place…';
         return;
       }
-      const who = g.turn.player === this.human ? 'Votre tour' : `Tour de ${escapeHtml(g.turn.player.name)}`;
-      const extra = g.turn.maxPlays > 1 ? ` (${g.turn.maxPlays} cartes possibles)` : '';
-      box.innerHTML = `<span class="turn-no">Tour ${g.turnNumber}</span> <strong>${who}</strong> <span class="phase">${PHASES[g.turn.phase] || ''}${extra}</span>`;
+      const p = g.turn.player;
+      const who = p === this.human ? `<span class="who" style="--pc: ${colorOf(p)}">Votre tour</span>` : `Tour de ${nameTag(p)}`;
+      const extra = g.turn.maxPlays > 1 ? `<span class="extra">${g.turn.maxPlays} cartes à jouer</span>` : '';
+      const now = PHASE_STEPS.findIndex(([key]) => key === g.turn.phase);
+      // The current phase only pops when it has just changed.
+      const changed = `${g.turnNumber}:${g.turn.phase}` !== this.shownPhase;
+      this.shownPhase = `${g.turnNumber}:${g.turn.phase}`;
+      const steps = PHASE_STEPS.map(([key, label], i) => {
+        const cls = i < now ? 'done' : i === now ? `current${changed ? ' enter' : ''}` : '';
+        return `<li class="${cls}" title="${PHASES[key]}">${label}</li>`;
+      }).join('');
+      box.innerHTML = `<span class="turn-no">Tour ${g.turnNumber}</span> <strong>${who}</strong><ol class="phases">${steps}</ol>${extra}`;
+    }
+
+    // The recent plays of every player, newest first.
+    renderFeed(g) {
+      const box = $('feed');
+      box.innerHTML = '';
+      box.hidden = this.feed.length === 0;
+      if (box.hidden) return;
+      box.appendChild(el('h3', 'zone-title', 'Dernières actions'));
+      const row = el('div', 'feed-row');
+      for (const item of this.feed.slice().reverse()) {
+        const tile = el('div', 'tile');
+        tile.style.setProperty('--pc', colorOf(item.player));
+        if (item.fresh) tile.classList.add('enter');
+        if (item === this.feed[this.feed.length - 1]) tile.classList.add('latest');
+        item.fresh = false;
+        tile.appendChild(el('div', 'tile-head', nameTag(item.player)));
+        if (item.card) {
+          const card = this.cardEl(item.card, 'small');
+          tile.appendChild(card);
+          if (item.countered) card.appendChild(el('div', 'stamp', 'Contrée'));
+          for (const n of item.neighs) tile.appendChild(el('div', 'tile-neigh', `${escapeHtml(n.card.def.name)} : ${escapeHtml(n.player.name)}`));
+        } else {
+          tile.appendChild(this.backEl('small'));
+          tile.appendChild(el('div', 'tile-neigh drew', 'a pioché'));
+        }
+        tile.appendChild(el('div', 'tile-turn', `tour ${item.turn}`));
+        row.appendChild(tile);
+      }
+      box.appendChild(row);
+    }
+
+    renderBanner(g) {
+      if (!g.turn || g.result || this.turnShown === g.turnNumber) return;
+      this.turnShown = g.turnNumber;
+      const p = g.turn.player;
+      const box = $('banner');
+      box.style.setProperty('--pc', colorOf(p));
+      box.innerHTML = `<span class="banner-turn">Tour ${g.turnNumber}</span><span class="banner-who">${p === this.human ? 'À vous de jouer !' : escapeHtml(p.name)}</span>`;
+      if (!calm.matches) replay(box, 'show');
+    }
+
+    // The card an opponent just played shows big in the middle of the screen for a moment.
+    // It is skipped while the player is asked about a Neigh, because the prompt already shows the cards.
+    renderSpotlight(g) {
+      const item = this.spot;
+      this.spot = null;
+      if (!item || calm.matches || (this.request && this.request.type === 'neigh')) return;
+      const box = $('spotlight');
+      box.innerHTML = '';
+      box.style.setProperty('--pc', colorOf(item.player));
+      box.style.setProperty('--hold', `${Math.min(2600, Math.max(1100, Number($('speed').value) * 2.2))}ms`);
+      box.appendChild(el('div', 'spot-caption', `${nameTag(item.player)} joue`));
+      const card = el('div', '', this.cardHtml(item.card, 'large')).firstChild;
+      box.appendChild(card);
+      const neigh = item.neighs[item.neighs.length - 1];
+      if (item.countered) card.appendChild(el('div', 'stamp', 'Contrée'));
+      else if (neigh) box.appendChild(el('div', 'spot-neigh', `${escapeHtml(neigh.card.def.name)} de ${escapeHtml(neigh.player.name)} !`));
+      replay(box, 'show');
     }
 
     renderPrompt(g) {
       const box = $('prompt');
       box.innerHTML = '';
-      box.classList.remove('active');
+      box.classList.remove('active', 'alert');
       const r = this.request;
       if (!r) {
+        this.shownRequest = null;
         if (g.pending && g.pending.player !== this.human && !g.result) box.appendChild(el('p', 'waiting', `${escapeHtml(g.pending.player.name)} réfléchit…`));
         return;
       }
       box.classList.add('active');
+      box.classList.toggle('alert', r.type === 'neigh');
+      if (r !== this.shownRequest) {
+        this.shownRequest = r;
+        if (!calm.matches) replay(box, 'enter');
+      }
       const actions = el('div', 'prompt-actions');
       const button = (label, fn, cls) => {
         const b = el('button', cls || '', escapeHtml(label));
@@ -466,13 +798,16 @@
       const box = $('me');
       box.innerHTML = '';
       const p = this.human;
-      const head = el('div', 'player-head', `<strong>${escapeHtml(p.name)}</strong>${this.countLine(g, p)}`);
+      const head = el('div', 'player-head', `${nameTag(p)}${this.countLine(g, p)}`);
+      box.style.setProperty('--pc', colorOf(p));
       box.classList.toggle('active', !!(g.turn && g.turn.player === p));
       box.appendChild(head);
       box.appendChild(el('h3', 'zone-title', 'Votre Écurie'));
       this.renderStable(box, p, 'medium');
       box.appendChild(el('h3', 'zone-title', `Votre main (${p.hand.length}${g.hasInStable(p, 'nanny_cam') ? ', visible par tous' : ''})`));
       const hand = el('div', 'hand');
+      hand.dataset.zone = 'hand';
+      hand.dataset.anchor = anchorKey('hand', p.index);
       for (const c of p.hand) hand.appendChild(this.cardEl(c, 'medium'));
       if (p.hand.length === 0) hand.appendChild(el('div', 'empty', 'Aucune carte'));
       box.appendChild(hand);
